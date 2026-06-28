@@ -1,4 +1,4 @@
-from scapy.all import sniff, get_if_list, conf
+from scapy.all import sniff, get_if_list, conf, IP, TCP, UDP, ICMP, Raw, DNS
 import time
 from collections import deque
 from database.db import save_packets_batch
@@ -13,6 +13,8 @@ db_batch = []
 # Reset counter every 10 minutes
 packet_count_since_reset = 0
 last_count_reset = time.time()
+
+capture_running = False
 
 def get_active_interface():
     """Dynamically finds the best network interface to sniff on."""
@@ -29,6 +31,28 @@ def get_active_interface():
         if "Loopback" not in i and "Virtual" not in i:
             return i
     return None
+
+def get_port_label(src_port, dst_port):
+    """Return a friendly label for common service ports."""
+    port = dst_port or src_port
+    labels = {
+        21: "FTP",
+        22: "SSH",
+        25: "SMTP",
+        53: "DNS",
+        67: "DHCP",
+        68: "DHCP",
+        80: "HTTP",
+        110: "POP3",
+        123: "NTP",
+        143: "IMAP",
+        443: "HTTPS",
+        587: "SMTP",
+        993: "IMAPS",
+        995: "POP3S",
+    }
+    return labels.get(port, "")
+
 
 def process_packet(packet):
     global db_batch, packet_count_since_reset, last_count_reset
@@ -60,8 +84,9 @@ def process_packet(packet):
         info = ""
         layer = proto_name
 
-        if packet.haslayer("TCP"):
-            tcp_flags = packet["TCP"].flags
+        if packet.haslayer(TCP):
+            tcp = packet[TCP]
+            tcp_flags = tcp.flags
             flag_names = []
             if tcp_flags & 0x02:
                 flag_names.append("SYN")
@@ -75,16 +100,56 @@ def process_packet(packet):
                 flag_names.append("PSH")
             if tcp_flags & 0x20:
                 flag_names.append("URG")
-            info = ",".join(flag_names) if flag_names else "TCP"
+
+            port_label = get_port_label(src_port, dst_port)
+            if flag_names:
+                info = ", ".join(flag_names)
+            elif port_label:
+                info = port_label
+            else:
+                info = "TCP"
+
             if dst_port in {80, 443} or src_port in {80, 443}:
                 layer = "HTTP"
-        elif packet.haslayer("UDP"):
+            elif port_label:
+                layer = port_label
+
+            if packet.haslayer(Raw):
+                try:
+                    payload = bytes(packet[Raw].load)
+                    text = payload.decode("latin-1", errors="ignore")
+                    if "HTTP/" in text or text.startswith(("GET ", "POST ", "HEAD ", "PUT ", "DELETE ")):
+                        info = "HTTP " + text.splitlines()[0].strip()
+                    elif "CONNECT " in text:
+                        info = "HTTPS CONNECT"
+                    elif b"\x16\x03" in payload[:3]:
+                        info = "TLS ClientHello"
+                    elif port_label and info == port_label:
+                        info = port_label
+                except Exception:
+                    pass
+
+        elif packet.haslayer(UDP):
+            port_label = get_port_label(src_port, dst_port)
             if dst_port == 53 or src_port == 53:
-                info = "DNS"
                 layer = "DNS"
+                if packet.haslayer(DNS):
+                    dns = packet[DNS]
+                    qname = ""
+                    if dns.qdcount and dns.qd:
+                        try:
+                            qname = dns.qd.qname.decode("utf-8", errors="ignore")
+                        except Exception:
+                            qname = str(dns.qd.qname)
+                    info = f"DNS query: {qname}" if qname else "DNS"
+                else:
+                    info = "DNS"
+            elif port_label:
+                info = port_label
+                layer = port_label
             else:
                 info = "UDP"
-        elif packet.haslayer("ICMP"):
+        elif packet.haslayer(ICMP):
             info = "ICMP"
         else:
             info = proto_name
@@ -125,24 +190,44 @@ def process_packet(packet):
             except Exception as e:
                 print(f"[!] Database Write Error: {e}")
 
+def is_capture_running():
+    return capture_running
+
+
+def stop_sniffer():
+    global capture_running
+    capture_running = False
+    return True
+
+
 def start_sniffer():
+    global capture_running
     target_iface = get_active_interface()
-    
+
     if not target_iface:
         print("[!] FATAL: No suitable network interface found.")
+        capture_running = False
         return
-    
+
+    capture_running = True
+
     try:
         print(f"[*] Sniffer active on: {target_iface}")
-        # store=False is critical to prevent Scapy from consuming all RAM
-        sniff(
-            iface=target_iface,
-            prn=process_packet,
-            store=False
-        )
+        while capture_running:
+            # store=False is critical to prevent Scapy from consuming all RAM
+            sniff(
+                iface=target_iface,
+                prn=process_packet,
+                store=False,
+                stop_filter=lambda _: not capture_running,
+                timeout=1
+            )
     except Exception as e:
         print(f"[!] Sniffer ERROR: {e}")
         print("[*] Hint: Ensure you are running as Administrator (sudo).")
+    finally:
+        capture_running = False
+
 
 def get_packet_count_since_reset():
     """Return the packet count since the last 10-minute reset."""

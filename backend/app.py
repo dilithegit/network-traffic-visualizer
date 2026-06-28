@@ -4,7 +4,7 @@ from flask import Flask, jsonify
 from flask_cors import CORS
 
 # Internal imports
-from capture.sniffer import traffic_data, start_sniffer
+from capture.sniffer import traffic_data, start_sniffer, stop_sniffer, is_capture_running
 from analysis.stats import get_traffic_stats
 from database.db import init_db
 from config import API_HOST, API_PORT, API_DEBUG
@@ -56,6 +56,21 @@ def stats():
     except Exception as e:
         logger.error(f"Error in /stats: {e}")
         return jsonify({"error": str(e)}), 500
+
+@app.route("/capture/stop", methods=["POST"])
+def stop_capture():
+    """Stop the packet sniffer and mark capture as inactive."""
+    try:
+        stop_sniffer()
+        return jsonify({"success": True, "running": False}), 200
+    except Exception as e:
+        logger.error(f"Error stopping capture: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+@app.route("/capture/status", methods=["GET"])
+def capture_status():
+    """Return the current capture running state."""
+    return jsonify({"running": is_capture_running()}), 200
 
 @app.errorhandler(404)
 def not_found(error):
