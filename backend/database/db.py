@@ -1,10 +1,12 @@
 import sqlite3
 import os
-
-DB_PATH = os.path.join(os.path.dirname(__file__), "packets.db")
+from config import DB_PATH
 
 def init_db():
     """Initializes the database and creates the packets table."""
+    # Create directory if it doesn't exist
+    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+    
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute('''
@@ -20,6 +22,15 @@ def init_db():
             is_local INTEGER
         )
     ''')
+    
+    # Create index for faster queries
+    cursor.execute('''
+        CREATE INDEX IF NOT EXISTS idx_src_ip ON packets(src_ip)
+    ''')
+    cursor.execute('''
+        CREATE INDEX IF NOT EXISTS idx_timestamp ON packets(timestamp)
+    ''')
+    
     conn.commit()
     conn.close()
     print(f"[*] Database initialized at {DB_PATH}")

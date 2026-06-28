@@ -1,56 +1,80 @@
 import threading
+import logging
 from flask import Flask, jsonify
 from flask_cors import CORS
 
 # Internal imports
-from backend.capture.sniffer import traffic_data, start_sniffer
-from backend.analysis.stats import get_traffic_stats
-from backend.database.db import init_db
+from capture.sniffer import traffic_data, start_sniffer
+from analysis.stats import get_traffic_stats
+from database.db import init_db
+from config import API_HOST, API_PORT, API_DEBUG
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 CORS(app)
 
+sniffer_thread = None
+
 def run_sniffer_thread():
     """Wrapper to start the sniffer in a background thread."""
-    print("[*] Initializing Network Sniffer...")
+    logger.info("[*] Initializing Network Sniffer...")
     try:
         start_sniffer()
     except Exception as e:
-        print(f"[!] Sniffer Error: {e}")
+        logger.error(f"[!] Sniffer Error: {e}")
 
-@app.route("/")
+@app.route("/", methods=["GET"])
 def home():
-    # We use a try/except here just in case the thread hasn't defined 'sniffer_thread' yet
+    """Health check endpoint"""
     try:
-        is_alive = sniffer_thread.is_alive()
-    except NameError:
+        is_alive = sniffer_thread.is_alive() if sniffer_thread else False
+    except (NameError, AttributeError):
         is_alive = False
-    return {"status": "CNS Project 1 Backend Running", "sniffer_active": is_alive}
+    return jsonify({
+        "status": "CNS Project 1 Backend Running",
+        "sniffer_active": is_alive,
+        "version": "1.1.0"
+    }), 200
 
 @app.route("/traffic", methods=["GET"])
 def get_traffic():
+    """Get recent traffic packets"""
     try:
-        # traffic_data is a deque, so we convert to list to slice it for JSON
-        return jsonify(list(traffic_data)[-50:])
+        return jsonify(list(traffic_data)[-50:]), 200
     except Exception as e:
+        logger.error(f"Error in /traffic: {e}")
         return jsonify({"error": str(e)}), 500
     
 @app.route("/stats", methods=["GET"])
 def stats():
+    """Get comprehensive traffic statistics"""
     try:
-        return jsonify(get_traffic_stats())
+        return jsonify(get_traffic_stats()), 200
     except Exception as e:
+        logger.error(f"Error in /stats: {e}")
         return jsonify({"error": str(e)}), 500
+
+@app.errorhandler(404)
+def not_found(error):
+    return jsonify({"error": "Endpoint not found"}), 404
+
+@app.errorhandler(500)
+def internal_error(error):
+    return jsonify({"error": "Internal server error"}), 500
 
 if __name__ == "__main__":
     # 1. Create the database and table FIRST
-    # This ensures the 'packets' table exists before the sniffer tries to write to it
-    init_db() 
+    logger.info("[*] Initializing database...")
+    init_db()
     
     # 2. Start the sniffer SECOND
+    logger.info("[*] Starting packet sniffer thread...")
     sniffer_thread = threading.Thread(target=run_sniffer_thread, daemon=True)
     sniffer_thread.start()
     
     # 3. Run the API THIRD
-    print("[*] API running at http://127.0.0.1:5000")
-    app.run(host="127.0.0.1", port=5000, debug=False)
+    logger.info(f"[*] API running at http://{API_HOST}:{API_PORT}")
+    app.run(host=API_HOST, port=API_PORT, debug=API_DEBUG)
