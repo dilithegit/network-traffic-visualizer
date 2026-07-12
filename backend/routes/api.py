@@ -1,16 +1,68 @@
-"""
-API Routes
-Additional route definitions (currently handled in app.py)
-This file is reserved for future API expansion
-"""
+from flask import Blueprint, jsonify, request
+from capture.interface_manager import (
+    get_interface_list,
+    set_active_interface,
+    get_active_interface_display,
+)
+from capture.sniffer import start_capture, stop_capture, is_capture_running, traffic_data
+from analysis.stats import get_traffic_stats
+from alerts.notifier import alert_notifier
 
-from flask import Blueprint
+api = Blueprint('api', __name__)
 
-api = Blueprint('api', __name__, url_prefix='/api')
 
-# Future API endpoints can be added here
-# Example:
-# @api.route('/detailed-stats', methods=['GET'])
-# def detailed_stats():
-#     # Implementation
-#     pass
+@api.route('/interfaces', methods=['GET'])
+def interfaces():
+    """Return the list of available capture interfaces."""
+    return jsonify({
+        'interfaces': get_interface_list(),
+        'active_interface': get_active_interface_display(),
+    }), 200
+
+
+@api.route('/capture/start', methods=['POST'])
+def start_capture_route():
+    """Start capture on a selected interface."""
+    data = request.get_json(force=True, silent=True) or {}
+    interface = data.get('interface')
+    if not interface:
+        return jsonify({'success': False, 'error': 'Interface name is required'}), 400
+
+    started = start_capture(interface)
+    return jsonify({'success': started, 'running': started, 'active_interface': get_active_interface_display()}), 200 if started else 500
+
+
+@api.route('/capture/stop', methods=['POST'])
+def stop_capture_route():
+    """Stop the packet capture."""
+    stopped = stop_capture()
+    return jsonify({'success': stopped, 'running': not stopped}), 200 if stopped else 500
+
+
+@api.route('/capture/status', methods=['GET'])
+def capture_status_route():
+    """Return the current capture running state."""
+    return jsonify({'running': is_capture_running(), 'active_interface': get_active_interface_display()}), 200
+
+
+@api.route('/traffic', methods=['GET'])
+def get_traffic():
+    """Provide the most recent packet traffic entries."""
+    recent = list(traffic_data)[-100:]
+    return jsonify(recent), 200
+
+
+@api.route('/stats', methods=['GET'])
+def stats_route():
+    """Return traffic and bandwidth statistics."""
+    return jsonify(get_traffic_stats()), 200
+
+
+@api.route('/alerts', methods=['GET'])
+def get_alerts():
+    """Return recent alerts, URL extraction history, and suspicious host data."""
+    return jsonify({
+        'alerts': alert_notifier.get_recent_alerts(),
+        'url_history': alert_notifier.get_recent_urls(),
+        'suspicious_hosts': alert_notifier.get_suspicious_ips(),
+    }), 200

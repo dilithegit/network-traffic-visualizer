@@ -2,10 +2,15 @@
 __pycache__/
 *.pyc
 .env
+*.db
 
 # Node
 node_modules/
 build/
+dist/
+
+# Virtual env
+.venv/
 
 # OS
 .DS_Store

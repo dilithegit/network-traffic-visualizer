@@ -1,19 +1,31 @@
-# CNS Project 1 - Complete Network Traffic Analyzer & Bandwidth Monitor
+# NETSENTRY (PacketMon) - Real-Time Network Traffic Analyzer & Bandwidth Monitor
 
 ## Overview
 
-**PacketMon** is a professional-grade real-time network packet analyzer and bandwidth monitoring system. It captures live network traffic, analyzes protocols, and identifies high-bandwidth consumers with intelligent alerting.
+**NETSENTRY** (formerly **PacketMon**) is a lightweight, Wireshark-inspired, real-time network packet analyzer and bandwidth monitoring system for Local Area Networks. It captures live traffic with Scapy, extracts modern web activity (HTTP URLs + HTTPS SNI, including QUIC), detects traffic spikes and suspicious hosts, and streams everything to a responsive React dashboard over Socket.IO.
 
 ### Key Features
 
 ✅ **Real-Time Packet Capture** - Live network sniffing using Scapy  
+✅ **Dynamic Interface Selection** - Wireshark-style dropdown; switch interfaces without restart  
+✅ **Modern URL Detection** - HTTP URL reconstruction + HTTPS SNI (TLS) extraction  
+✅ **QUIC / UDP Capture** - Detects modern UDP/443 traffic  
 ✅ **Bandwidth Monitoring** - Tracks total bandwidth and per-IP usage  
-✅ **High Bandwidth Alerts** - Automatic detection of excessive bandwidth usage  
-✅ **Protocol Analysis** - Breaks down traffic by TCP, UDP, ICMP, etc.  
-✅ **Live Dashboard** - Beautiful, responsive web UI with charts and metrics  
+✅ **Traffic Spike Detection** - Per-IP packets/sec & bytes/sec anomaly alerts  
+✅ **Suspicious Host Tracking** - WARNING / CRITICAL status registry per IP  
+✅ **Live Alerts & Feeds** - Real-time URL, spike and alert panels  
+✅ **Protocol Analysis** - Breaks down traffic by TCP, UDP, ICMP, QUIC, etc.  
+✅ **Live Dashboard** - Responsive Tailwind UI with Chart.js, light/dark themes  
+✅ **Socket.IO Streaming** - Separate events for packets, URLs, spikes, stats, alerts  
 ✅ **Database Persistence** - SQLite storage for historical analysis  
 ✅ **RESTful API** - Clean API endpoints for frontend consumption  
-✅ **Performance Optimized** - Batch processing, efficient buffering, indexed DB queries  
+✅ **Performance Optimized** - Rolling buffers, rAF-batched rendering, batch DB writes  
+
+### Tech Stack
+
+- **Backend:** Python, Flask, Flask-SocketIO, Scapy
+- **Frontend:** React (Vite), Tailwind CSS, Chart.js
+- **Realtime:** Socket.IO
 
 ---
 
@@ -21,38 +33,45 @@
 
 ```
 CNS Project 1/
-├── backend/                    # Python Flask API & Packet Sniffer
-│   ├── app.py                 # Main Flask application
-│   ├── config.py              # Configuration settings
+├── backend/                    # Python Flask + Socket.IO API & Packet Sniffer
+│   ├── app.py                 # App entry: blueprint + Socket.IO wiring
+│   ├── config.py              # Configuration & thresholds
 │   ├── capture/
-│   │   ├── sniffer.py         # Packet capture engine (Scapy)
-│   │   └── parser.py          # Packet parsing utilities
+│   │   ├── sniffer.py         # Packet capture engine (Scapy) + URL/spike fan-out
+│   │   ├── parser.py          # Packet parsing utilities
+│   │   └── interface_manager.py  # Wireshark-style interface enumeration
 │   ├── analysis/
-│   │   ├── stats.py           # Traffic statistics
-│   │   └── bandwidth.py       # 🆕 Bandwidth monitoring & alerts
+│   │   ├── stats.py           # Aggregated traffic statistics
+│   │   ├── bandwidth.py       # Bandwidth monitoring & alerts
+│   │   ├── url_extractor.py   # HTTP URL + HTTPS SNI extraction
+│   │   └── spike_detector.py  # Per-IP spike detection & suspicious hosts
+│   ├── alerts/
+│   │   └── notifier.py        # Socket.IO event broadcaster + history
 │   ├── database/
 │   │   └── db.py              # SQLite database management
 │   ├── models/
 │   │   └── traffic_model.py   # Data models
-│   └── routes/
-│       └── api.py             # API routes
-├── frontend/                   # React + Vite Dashboard
+│   ├── routes/
+│   │   └── api.py             # REST API routes
+│   ├── services/
+│   │   └── socket_events.py   # Socket.IO handlers + stats broadcaster
+│   └── tests/                 # Backend unit tests
+├── frontend/                   # React (Vite) + Tailwind + Chart.js Dashboard
 │   ├── src/
-│   │   ├── App.jsx            # Main dashboard component
 │   │   ├── main.jsx           # Entry point
-│   │   ├── index.css          # Global styles
-│   │   ├── components/
-│   │   │   ├── AnalyticsPanel.jsx
-│   │   │   ├── LogTable.jsx
-│   │   │   ├── TrafficCharts.js
-│   │   │   └── Navbar.jsx
-│   │   └── assets/
+│   │   ├── App.jsx            # Re-export of Dashboard
+│   │   ├── index.css          # Tailwind directives + base styles
+│   │   ├── components/        # Navbar, charts, feeds, tables, panels
+│   │   ├── pages/Dashboard.jsx# Dashboard layout
+│   │   ├── context/           # ThemeContext, StatsContext
+│   │   ├── hooks/             # useCaptureControl, useSocketEvents
+│   │   └── services/          # socket.js, api.js, chartSetup.js
+│   ├── tailwind.config.js
+│   ├── postcss.config.js
 │   ├── package.json
 │   ├── vite.config.js
 │   └── index.html
-├── scripts/
-│   ├── start_project.sh       # Linux/Mac startup script
-│   └── start_project.bat      # Windows startup script
+├── scripts/                   # Cross-platform startup scripts
 ├── requirements.txt           # Python dependencies
 └── README.md                  # This file
 ```
@@ -206,6 +225,43 @@ Get comprehensive traffic statistics
   }
 }
 ```
+
+### `GET /interfaces`
+List available capture interfaces (Wireshark-style friendly names).
+```json
+{ "interfaces": ["Wi-Fi", "Ethernet", "Loopback"], "active_interface": "Wi-Fi" }
+```
+
+### `POST /capture/start`
+Start (or restart) capture on a selected interface.
+```json
+{ "interface": "Wi-Fi" }
+```
+
+### `POST /capture/stop`
+Stop the running capture.
+
+### `GET /capture/status`
+```json
+{ "running": true, "active_interface": "Wi-Fi" }
+```
+
+### `GET /alerts`
+```json
+{
+  "alerts": [ { "alert": "Traffic Spike Detected", "src_ip": "192.168.1.14", "severity": "HIGH" } ],
+  "url_history": [ { "timestamp": "14:23:10", "src_ip": "192.168.1.12", "protocol": "HTTPS", "url": "youtube.com" } ],
+  "suspicious_hosts": [ "192.168.1.14" ]
+}
+```
+
+### Socket.IO Events
+Real-time push channel (client connects to `http://127.0.0.1:5000`):
+- `new_packet` - a single parsed packet (live log)
+- `new_url` - a detected HTTP URL / HTTPS SNI
+- `spike_detected` - a per-IP traffic spike
+- `statistics_update` - aggregated stats every ~2s
+- `new_alert` - generic alert (bandwidth threshold, spikes, domains)
 
 ---
 
@@ -406,7 +462,19 @@ This project is provided as-is for network analysis and monitoring purposes. Ens
 
 ## Version History
 
-### v1.1.0 (Current)
+### v2.0.0 (Current) - NETSENTRY
+- 🌐 Dynamic Wireshark-style interface selection (`GET /interfaces`, `POST /capture/start`)
+- 🔍 Modern URL detection: HTTP URL reconstruction + HTTPS SNI (TLS) extraction
+- ⚡ QUIC / UDP-443 capture and detection
+- 📈 Real-time traffic spike detection (per-IP packets/sec & bytes/sec)
+- 🚨 Suspicious host registry with NORMAL / WARNING / CRITICAL status
+- 🔔 Live alert panel + dedicated spike and URL feeds
+- 💡 Light / dark theme toggle (Tailwind `darkMode: "class"`, localStorage)
+- 🔌 Socket.IO streaming with separate events (`new_packet`, `new_url`, `spike_detected`, `statistics_update`, `new_alert`)
+- 🧩 Modular backend (`capture/`, `analysis/`, `alerts/`, `routes/`, `services/`) and frontend (`components/`, `pages/`, `services/`, `context/`, `hooks/`)
+- ⚡ Flicker-free UI: `React.memo`, rAF-batched packet buffer, capped rolling history
+
+### v1.1.0
 - ✨ Added bandwidth monitoring module
 - 🎨 Enhanced dashboard with bandwidth charts
 - 🚨 High bandwidth consumer alerts

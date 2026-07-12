@@ -54,10 +54,10 @@ python app.py
 
 Expected output:
 ```
-[*] Database initialized...
-[*] Initializing Network Sniffer...
-[*] Sniffer active on: [interface_name]
-[*] API running at http://127.0.0.1:5000
+[*] Database initialized at .../packets.db
+[*] Auto-starting capture on: <interface>
+[*] Capture started on interface: <interface>
+[*] NETSENTRY API + Socket.IO on http://127.0.0.1:5000
 ```
 
 ### Terminal 2 - Frontend
@@ -127,20 +127,25 @@ SNIFFER_BATCH_SIZE = 100
 
 ## 📊 Understanding the Dashboard
 
-### Top Cards
-- **Total Packets:** Total captured packets since start
-- **Bandwidth Usage:** Current Mbps consumption (with peak shown)
-- **Active Ports:** Unique destination ports in use
-- **High Consumers:** IPs exceeding bandwidth threshold
+The NETSENTRY console (PacketMon) is a Wireshark-inspired LAN monitor.
 
-### Charts
-- **Protocol Distribution:** Pie chart of TCP/UDP/ICMP/etc
-- **Packet Activity:** Line graph of packets per second over time
-- **Bandwidth Usage:** Line graph showing Mbps and threshold
+### Top Bar
+- **Interface dropdown:** Pick the capture interface (Wi-Fi, Ethernet, etc.). Switching stops the previous capture and restarts on the new one.
+- **Status pill:** ACTIVE / IDLE / DISCONNECTED (Socket.IO connection state).
+- **START / STOP:** Control live capture.
+- **Theme toggle:** Switch light / dark (persisted in localStorage).
 
-### Alerts
-- Red banner appears when bandwidth exceeds threshold
-- High consumers list shows IPs using excessive bandwidth
+### Stat Cards
+- **Packets / Throughput / Avg Pkt / High IPs / Interface / Host**
+
+### Charts & Panels
+- **Bandwidth Analytics:** Line graph of Mbps over time vs threshold.
+- **Protocol Distribution:** Doughnut of TCP/UDP/ICMP/QUIC/etc.
+- **Live URL Activity:** Detected HTTP URLs and HTTPS SNI (TLS).
+- **Traffic Spike Alerts:** Per-IP packet/bandwidth anomalies.
+- **Live Packet Log:** Real-time packet stream (rAF-batched, capped).
+- **Suspicious Hosts:** IPs that exceeded thresholds (NORMAL/WARNING/CRITICAL).
+- **Live Alerts:** Unified real-time alert feed.
 
 ---
 
@@ -175,12 +180,27 @@ Test these in your browser or with curl:
 # Health check
 curl http://127.0.0.1:5000/
 
+# List interfaces (Wireshark-style friendly names)
+curl http://127.0.0.1:5000/interfaces
+
+# Start capture on an interface
+curl -X POST http://127.0.0.1:5000/capture/start -H "Content-Type: application/json" -d "{\"interface\":\"Wi-Fi\"}"
+
+# Stop capture
+curl -X POST http://127.0.0.1:5000/capture/stop
+
 # Get recent traffic
 curl http://127.0.0.1:5000/traffic
 
 # Get statistics
 curl http://127.0.0.1:5000/stats
+
+# Get alerts / URL history / suspicious hosts
+curl http://127.0.0.1:5000/alerts
 ```
+
+Real-time updates (bandwidth, URLs, spikes, alerts) are pushed over Socket.IO
+events: `new_packet`, `new_url`, `spike_detected`, `statistics_update`, `new_alert`.
 
 ---
 
