@@ -246,7 +246,10 @@ def classify(packet):
         info = "ICMP"
         protocol = "ICMP"
     else:
-        layer = protocol
+        # Unrecognised IP protocol (GRE, ESP, AH, IGMP, IPv6, ...). Show the
+        # real protocol name when known, otherwise bucket as "Unknown" so the
+        # pie chart stays readable (req 7).
+        layer = "Unknown" if protocol.startswith("OTHER") else protocol
         info = protocol
 
     return {

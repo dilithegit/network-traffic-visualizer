@@ -22,6 +22,7 @@ from config import (
     SPIKE_SEVERITY_CRITICAL_Z,
     SPIKE_SEVERITY_WARNING_Z,
 )
+from analysis.hostname_cache import hostname_cache
 
 logger = __import__("logging").getLogger(__name__)
 
@@ -186,11 +187,17 @@ class SpikeDetector:
             profile = self.host_profiles.setdefault(ip, self._new_profile(ip))
             profile["spike_count"] += 1
             profile["current_status"] = status
+            # Resolve a hostname for the offending IP via the DNS cache so
+            # alerts read "www.youtube.com" instead of a bare address (req 4).
+            hostname = hostname_cache.resolve(ip) or ""
             alert = {
                 "alert": "Traffic Spike Detected",
+                "alert_type": "HIGH BANDWIDTH" if mbps >= 1 else "SPIKE",
                 "src_ip": ip,
+                "hostname": hostname,
                 "packets_per_second": pps,
                 "bandwidth_mbps": mbps,
+                "peak_mbps": profile["highest_bandwidth_mbps"],
                 "severity": status,
                 "timestamp": time.strftime("%H:%M:%S", time.localtime(now)),
             }

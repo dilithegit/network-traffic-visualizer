@@ -1,7 +1,7 @@
 from flask import Blueprint, jsonify, request
 from capture.interface_manager import (
     get_interface_list,
-    get_interface_statuses,
+    get_interface_details,
     set_active_interface,
     get_active_interface_display,
 )
@@ -18,7 +18,7 @@ def interfaces():
     """Return available capture interfaces plus their health status (req 5)."""
     return jsonify({
         'interfaces': get_interface_list(),
-        'statuses': get_interface_statuses(),
+        'statuses': get_interface_details(),
         'active_interface': get_active_interface_display(),
     }), 200
 

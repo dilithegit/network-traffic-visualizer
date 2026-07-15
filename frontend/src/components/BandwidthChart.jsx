@@ -35,15 +35,6 @@ function BandwidthChartBase() {
         pointRadius: 0,
         borderWidth: 2,
       },
-      {
-        label: "Threshold",
-        data: history.map((h) => h.threshold),
-        borderColor: "#f97316",
-        borderDash: [5, 5],
-        fill: false,
-        pointRadius: 0,
-        borderWidth: 1.5,
-      },
     ],
   };
 
@@ -56,13 +47,16 @@ function BandwidthChartBase() {
         ticks: { color: "#94a3b8", maxTicksLimit: 6 },
       },
       y: {
+        // No fixed maximum: the Y-axis auto-scales to recent traffic
+        // (0-10 Mbps light load, 0-100 Mbps medium, 0-1000 Mbps heavy).
         beginAtZero: true,
+        suggestedMax: 10,
         grid: { color: "rgba(148,163,184,0.15)" },
         ticks: { color: "#94a3b8" },
       },
     },
     plugins: {
-      legend: { labels: { color: "#94a3b8", boxWidth: 12 } },
+      legend: { display: false },
       tooltip: { enabled: true },
     },
   };

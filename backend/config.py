@@ -23,7 +23,8 @@ SOCKET_BATCH_SIZE = 25             # Flush once this many packets are queued
 SOCKET_BATCH_INTERVAL = 0.2        # ...or at least this often (seconds)
 
 # How often (seconds) the statistics broadcaster pushes an update to clients.
-SOCKET_STATS_INTERVAL = 2
+# One second keeps the bandwidth graph responsive and live (req 3).
+SOCKET_STATS_INTERVAL = 1
 
 # Packet inspection preview (req 7). Raw payload is capped before being sent to
 # the browser to avoid bloating the Socket.IO frame.

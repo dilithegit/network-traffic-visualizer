@@ -39,23 +39,16 @@ function SpikeAlertPanelBase() {
             <div className="mb-1 flex items-center gap-2">
               <AlertTriangle size={14} className="text-rose-500" />
               <span className="font-semibold text-slate-700 dark:text-slate-200">
-                {s.alert}
+                {s.alert_type || s.alert}
               </span>
               <span className="ml-auto font-mono text-slate-400">{s.timestamp}</span>
             </div>
-            <div className="grid grid-cols-3 gap-2 font-mono text-slate-600 dark:text-slate-300">
-              <span>
-                <span className="text-slate-400">src </span>
-                {s.src_ip}
-              </span>
-              <span>
-                <span className="text-slate-400">pps </span>
-                {s.packets_per_second}
-              </span>
-              <span>
-                <span className="text-slate-400">bw </span>
-                {s.bandwidth_mbps} Mb/s
-              </span>
+            <div className="grid grid-cols-2 gap-x-3 gap-y-1 font-mono text-slate-600 dark:text-slate-300">
+              <span><span className="text-slate-400">src </span>{s.src_ip}</span>
+              <span><span className="text-slate-400">host </span>{s.hostname || "—"}</span>
+              <span><span className="text-slate-400">cur </span>{s.bandwidth_mbps} Mb/s</span>
+              <span><span className="text-slate-400">peak </span>{s.peak_mbps ?? s.bandwidth_mbps} Mb/s</span>
+              <span><span className="text-slate-400">pps </span>{s.packets_per_second}</span>
             </div>
             <span
               className={

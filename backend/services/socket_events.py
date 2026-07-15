@@ -17,8 +17,8 @@ from flask_socketio import SocketIO
 from analysis.stats import get_traffic_stats
 from alerts.notifier import alert_notifier
 from analysis.spike_detector import spike_detector
-from capture.interface_manager import get_interface_statuses
-from capture.sniffer import _flush_socket_batch
+from capture.interface_manager import get_interface_statuses, get_interface_details, get_active_interface_name
+from capture.sniffer import _flush_socket_batch, is_capture_running
 from config import SOCKET_STATS_INTERVAL
 
 socketio = SocketIO(cors_allowed_origins="*", async_mode="threading")
@@ -35,7 +35,7 @@ def init_socketio(app):
         socketio.emit("suspicious_hosts", alert_notifier.get_suspicious_ips())
         socketio.emit("alert_history", alert_notifier.get_recent_alerts())
         socketio.emit("url_history", alert_notifier.get_recent_urls())
-        socketio.emit("interface_status", get_interface_statuses())
+        socketio.emit("interface_status", get_interface_details())
 
     @socketio.on("request_stats")
     def handle_request_stats():
@@ -55,7 +55,7 @@ def init_socketio(app):
 
     @socketio.on("request_interfaces")
     def handle_request_interfaces():
-        socketio.emit("interface_status", get_interface_statuses())
+        socketio.emit("interface_status", get_interface_details())
 
     @socketio.on("set_sensitivity")
     def handle_set_sensitivity(payload):
@@ -83,6 +83,13 @@ def start_statistics_broadcaster(interval_seconds=SOCKET_STATS_INTERVAL):
 
                 stats = get_traffic_stats()
                 socketio.emit("statistics_update", stats)
+                # Push fresh per-interface detail (IPv4/MAC/packet counts/traffic
+                # state) every tick so the UI reflects live VMware/physical state.
+                socketio.emit("interface_status", get_interface_details(
+                    active_real=get_active_interface_name(),
+                    active_idle=stats.get("idle_warning", False),
+                    capture_running=is_capture_running(),
+                ))
 
                 # Network-wide bandwidth threshold (one-shot edge trigger).
                 bandwidth = stats.get("bandwidth", {})
@@ -106,8 +113,7 @@ def start_statistics_broadcaster(interval_seconds=SOCKET_STATS_INTERVAL):
                         "interface": iface,
                         "message": (
                             f"No traffic detected on {iface}. The interface may be "
-                            "inactive, disconnected, or have no promiscuous capture "
-                            "permission."
+                            "inactive, disconnected, or not currently carrying traffic."
                         ),
                         "timestamp": time.strftime("%H:%M:%S", time.localtime()),
                     })

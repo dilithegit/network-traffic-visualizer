@@ -15,6 +15,8 @@ import SuspiciousHosts from "../components/SuspiciousHosts";
 import AlertPanel from "../components/AlertPanel";
 import SensitivityControl from "../components/SensitivityControl";
 import InterfaceWarningBanner from "../components/InterfaceWarningBanner";
+import InterfaceInfo from "../components/InterfaceInfo";
+import FlowTrackerPanel from "../components/FlowTrackerPanel";
 import PacketAnalysis from "../components/PacketAnalysis";
 import Panel from "../components/Panel";
 import { useCaptureControl } from "../hooks/useCaptureControl";
@@ -30,9 +32,14 @@ function DashboardBase() {
       <NetworkStats />
       <InterfaceWarningBanner />
 
+      {/* Interface detail: every adapter's status, IPv4, MAC, packet counts */}
+      <Panel title="Network Interfaces" description="Per-adapter status, address and live traffic">
+        <InterfaceInfo />
+      </Panel>
+
       {/* Analytics row: bandwidth + dynamic protocol distribution */}
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-        <Panel title="Bandwidth Analytics" description="Throughput over time (Mb/s)">
+        <Panel title="Bandwidth Analytics" description="Live throughput (Mb/s)">
           <BandwidthChart />
         </Panel>
         <Panel title="Protocol Distribution" description="Auto-discovered traffic share">
@@ -49,13 +56,20 @@ function DashboardBase() {
       {/* Live packet workspace: search, timeline, table + inspector */}
       <PacketAnalysis />
 
-      {/* Hosts, alerts and detector tuning */}
+      {/* Active flows + detector tuning */}
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
-        <SuspiciousHosts />
-        <AlertPanel />
+        <div className="lg:col-span-2">
+          <FlowTrackerPanel />
+        </div>
         <Panel title="Detection Settings" description="Tune the statistical spike engine">
           <SensitivityControl />
         </Panel>
+      </div>
+
+      {/* Hosts and live alerts */}
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+        <SuspiciousHosts />
+        <AlertPanel />
       </div>
     </div>
   );

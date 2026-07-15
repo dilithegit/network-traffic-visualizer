@@ -21,6 +21,7 @@ from capture.sniffer import (
 from capture.interface_manager import get_active_interface_display
 from analysis.bandwidth import bandwidth_monitor
 from analysis.spike_detector import spike_detector
+from analysis.flow_tracker import flow_tracker
 from config import (
     PACKET_THRESHOLD,
     BANDWIDTH_SPIKE_THRESHOLD_BYTES,
@@ -117,6 +118,7 @@ def get_traffic_stats():
             {p["dst_port"] for p in data_snapshot if p["dst_port"] > 0}
         )[:10],
         "bandwidth": bandwidth_status,
+        "flows": flow_tracker.get_flows(),
         "suspicious_hosts": spike_detector.get_suspicious_hosts(),
         "spike_sensitivity": spike_detector.get_sensitivity(),
         "thresholds": {

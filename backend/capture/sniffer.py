@@ -45,6 +45,7 @@ from alerts.notifier import alert_notifier
 from analysis.url_extractor import url_extractor
 from analysis.spike_detector import spike_detector
 from analysis.hostname_cache import hostname_cache
+from analysis.flow_tracker import flow_tracker
 
 logger = __import__("logging").getLogger(__name__)
 
@@ -282,6 +283,11 @@ def process_packet(packet):
         spike_detector.process_packet(entry)
     except Exception as exc:  # pragma: no cover - defensive
         logger.debug("Spike detection failed: %s", exc)
+
+    try:
+        flow_tracker.process_packet(entry)
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.debug("Flow tracking failed: %s", exc)
 
     _db_batch.append(entry)
     if len(_db_batch) >= SNIFFER_BATCH_SIZE:

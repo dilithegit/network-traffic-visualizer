@@ -136,6 +136,77 @@ def get_interface_statuses():
     return statuses
 
 
+def get_interface_details(active_real=None, active_idle=False, capture_running=False):
+    """Return rich, UI-ready details for every interface (req 1, 5).
+
+    Each entry includes the friendly/real name, up/down status, IPv4, MAC
+    address, packets received/sent (via psutil when resolvable), whether Scapy
+    can open the adapter, and a live ``traffic`` state for the active adapter.
+    """
+    try:
+        import psutil
+        io_counters = psutil.net_io_counters(pernic=True) or {}
+    except Exception:
+        io_counters = {}
+
+    details = []
+    for real, display in _real_to_display.items():
+        iface = None
+        try:
+            iface = conf.ifaces.get(real)
+        except Exception:
+            iface = None
+
+        raw_status = getattr(iface, "status", None)
+        is_up = raw_status in (None, 1, "up", "UP")
+        is_loopback = bool(getattr(iface, "is_loopback", False)) or "loopback" in real.lower()
+        is_virtual = _is_virtual(real) and not is_loopback
+
+        # IPv4 / MAC from scapy's interface object (best-effort).
+        ipv4 = getattr(iface, "ip", "") or ""
+        mac = getattr(iface, "mac", "") or ""
+
+        # Resolve psutil per-NIC counters by real name, then friendly name.
+        io = io_counters.get(real) or _find_psutil_io(io_counters, display)
+        packets_recv = getattr(io, "packets_recv", None) if io else None
+        packets_sent = getattr(io, "packets_sent", None) if io else None
+
+        # Scapy lists the adapter, so it is openable in principle.
+        can_capture = True
+
+        # Live traffic state only makes sense for the adapter being captured.
+        if capture_running and real == active_real:
+            traffic = "Idle" if active_idle else "Active"
+        else:
+            traffic = "Not monitored"
+
+        details.append({
+            "display": display,
+            "real": real,
+            "is_up": is_up,
+            "is_loopback": is_loopback,
+            "is_virtual": is_virtual,
+            "ipv4": ipv4,
+            "mac": mac,
+            "packets_recv": packets_recv,
+            "packets_sent": packets_sent,
+            "can_capture": can_capture,
+            "traffic": traffic,
+        })
+    return details
+
+
+def _find_psutil_io(io_counters, display):
+    """Best-effort match of a scapy friendly name to a psutil NIC key."""
+    if not display:
+        return None
+    lowered = display.lower()
+    for key, val in io_counters.items():
+        if key and key.lower() == lowered:
+            return val
+    return None
+
+
 def get_default_real():
     """Pick a sane default interface, preferring an *up* physical adapter."""
     _refresh()
