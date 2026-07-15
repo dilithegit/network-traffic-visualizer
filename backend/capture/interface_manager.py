@@ -92,29 +92,61 @@ def get_active_interface_display():
     return _real_to_display.get(name, name)
 
 
-def get_default_real():
-    """Pick a sane default interface (prefer physical over loopback/virtual)."""
-    _refresh()
-    reals = list(_real_to_display.keys())
-    preferred = [
-        r
-        for r in reals
-        if r
-        and "loopback" not in r.lower()
-        and "virtual" not in r.lower()
-        and "vmware" not in r.lower()
-        and "vbox" not in r.lower()
-    ]
-    if preferred:
-        # Prefer the one whose display mentions Wi-Fi/Ethernet.
-        for r in preferred:
-            disp = _real_to_display[r].lower()
-            if "wi-fi" in disp or "ethernet" in disp or "local area" in disp:
-                return r
-        return preferred[0]
-    return reals[0] if reals else None
-
-
 def get_default_interface():
     """Return the friendly display name of the default interface."""
     return _real_to_display.get(get_default_real(), get_default_real())
+
+
+# Virtual / loopback markers used for classification + default selection.
+_VIRTUAL_MARKERS = ("vmware", "vbox", "virtual", "docker", "npcap", "loopback")
+
+
+def _is_virtual(real):
+    return any(marker in real.lower() for marker in _VIRTUAL_MARKERS)
+
+
+def get_interface_statuses():
+    """Return detailed status for every interface (req 5).
+
+    Each entry is a dict with the friendly ``display`` name, the real Scapy
+    name, and booleans describing whether the adapter is up, a loopback, or a
+    virtual/VMware adapter. This lets the UI surface informative warnings
+    (e.g. a VMware adapter that is present but receives no traffic) instead of
+    failing silently.
+    """
+    _refresh()
+    statuses = []
+    for real, display in _real_to_display.items():
+        iface = None
+        try:
+            iface = conf.ifaces.get(real)
+        except Exception:
+            iface = None
+        # scapy's NetworkInterface exposes ``status`` (1 == up, 0 == down).
+        raw_status = getattr(iface, "status", None)
+        is_up = raw_status in (None, 1, "up", "UP")
+        is_loopback = bool(getattr(iface, "is_loopback", False)) or "loopback" in real.lower()
+        statuses.append({
+            "display": display,
+            "real": real,
+            "is_up": is_up,
+            "is_loopback": is_loopback,
+            "is_virtual": _is_virtual(real) and not is_loopback,
+        })
+    return statuses
+
+
+def get_default_real():
+    """Pick a sane default interface, preferring an *up* physical adapter."""
+    _refresh()
+    statuses = get_interface_statuses()
+    candidates = [s for s in statuses if s["is_up"] and not s["is_loopback"] and not s["is_virtual"]]
+    preferred = candidates or [s for s in statuses if not s["is_loopback"]]
+    if preferred:
+        for s in preferred:
+            disp = s["display"].lower()
+            if "wi-fi" in disp or "ethernet" in disp or "local area" in disp:
+                return s["real"]
+        return preferred[0]["real"]
+    reals = list(_real_to_display.keys())
+    return reals[0] if reals else None

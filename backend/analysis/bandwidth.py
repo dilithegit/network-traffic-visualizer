@@ -30,10 +30,14 @@ class BandwidthMonitor:
         
         total_bytes = sum(p['size'] for p in window_packets)
         total_mbps = (total_bytes * 8) / (1024 * 1024 * self.window_seconds)
+        total_bps = (total_bytes * 8) / self.window_seconds
+        total_pps = len(window_packets) / self.window_seconds
         
         self.total_bandwidth_history.append({
             'timestamp': current_time,
-            'mbps': total_mbps
+            'mbps': total_mbps,
+            'bps': total_bps,
+            'pps': total_pps,
         })
         
         # Calculate per-IP bandwidth
@@ -55,10 +59,16 @@ class BandwidthMonitor:
         if not self.total_bandwidth_history:
             return {
                 'total_mbps': 0,
+                'total_bps': 0,
+                'total_pps': 0,
+                'avg_mbps': 0,
+                'peak_mbps': 0,
+                'avg_bps': 0,
+                'peak_bps': 0,
+                'avg_pps': 0,
+                'peak_pps': 0,
                 'is_high': False,
                 'high_consumers': [],
-                'avg_mbps': 0,
-                'peak_mbps': 0
             }
         
         current_time = time.time()
@@ -69,13 +79,20 @@ class BandwidthMonitor:
                               if m['timestamp'] >= window_start]
         
         if not recent_measurements:
-            total_mbps = 0
-            avg_mbps = 0
+            total_mbps = total_bps = total_pps = 0
+            avg_mbps = avg_bps = avg_pps = 0
         else:
-            total_mbps = recent_measurements[-1]['mbps']
+            last = recent_measurements[-1]
+            total_mbps = last['mbps']
+            total_bps = last.get('bps', 0)
+            total_pps = last.get('pps', 0)
             avg_mbps = sum(m['mbps'] for m in recent_measurements) / len(recent_measurements)
+            avg_bps = sum(m.get('bps', 0) for m in recent_measurements) / len(recent_measurements)
+            avg_pps = sum(m.get('pps', 0) for m in recent_measurements) / len(recent_measurements)
         
         peak_mbps = max((m['mbps'] for m in self.total_bandwidth_history), default=0)
+        peak_bps = max((m.get('bps', 0) for m in self.total_bandwidth_history), default=0)
+        peak_pps = max((m.get('pps', 0) for m in self.total_bandwidth_history), default=0)
         
         # Identify high bandwidth consumers
         high_consumers = []
@@ -96,8 +113,14 @@ class BandwidthMonitor:
         
         return {
             'total_mbps': round(total_mbps, 2),
+            'total_bps': round(total_bps, 2),
+            'total_pps': round(total_pps, 2),
             'avg_mbps': round(avg_mbps, 2),
             'peak_mbps': round(peak_mbps, 2),
+            'avg_bps': round(avg_bps, 2),
+            'peak_bps': round(peak_bps, 2),
+            'avg_pps': round(avg_pps, 2),
+            'peak_pps': round(peak_pps, 2),
             'is_high': total_mbps > BANDWIDTH_THRESHOLD_MBPS,
             'threshold_mbps': BANDWIDTH_THRESHOLD_MBPS,
             'high_consumers': high_consumers[:5],  # Top 5 consumers

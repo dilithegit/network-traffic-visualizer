@@ -32,6 +32,19 @@ class AlertNotifier:
         self.recent_packets.append(payload)
         self._emit("new_packet", payload)
 
+    def publish_packet_batch(self, payloads):
+        """Emit a list of parsed packets as one ``packet_batch`` event (req 9).
+
+        Batching dramatically cuts Socket.IO overhead under heavy capture.
+        Each payload is still retained in the bounded history for REST seeding.
+        """
+        if not payloads:
+            return
+        self.recent_packets.extend(payloads)
+        while len(self.recent_packets) > self.recent_packets.maxlen:
+            self.recent_packets.popleft()
+        self._emit("packet_batch", payloads)
+
     def publish_url(self, payload):
         """Emit a detected HTTP URL / HTTPS SNI."""
         self.recent_urls.append(payload)

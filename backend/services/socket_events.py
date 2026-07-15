@@ -1,10 +1,14 @@
-"""Socket.IO wiring for NETSENTRY.
+"""Socket.IO wiring for NETSENTRY (req 3, 5, 9).
 
 Exposes a single ``SocketIO`` instance, registers client event handlers, and
 runs the background broadcaster that pushes ``statistics_update`` to every
-connected client on a fixed interval. When the network-wide bandwidth
-threshold is crossed it also emits a one-shot ``new_alert`` so the alert feed
-is not spammed every tick.
+connected client on a fixed interval. It also:
+
+* Streams packets as batched ``packet_batch`` frames (the sniffer decides when
+  to flush) so high capture rates stay smooth.
+* Accepts a ``set_sensitivity`` event to re-tune the dynamic spike detector.
+* Pushes ``interface_status`` details and an ``interface_warning`` event when a
+  running adapter goes silent (req 5), and one-shot bandwidth alerts.
 """
 
 import time
@@ -12,6 +16,9 @@ import time
 from flask_socketio import SocketIO
 from analysis.stats import get_traffic_stats
 from alerts.notifier import alert_notifier
+from analysis.spike_detector import spike_detector
+from capture.interface_manager import get_interface_statuses
+from capture.sniffer import _flush_socket_batch
 from config import SOCKET_STATS_INTERVAL
 
 socketio = SocketIO(cors_allowed_origins="*", async_mode="threading")
@@ -28,6 +35,7 @@ def init_socketio(app):
         socketio.emit("suspicious_hosts", alert_notifier.get_suspicious_ips())
         socketio.emit("alert_history", alert_notifier.get_recent_alerts())
         socketio.emit("url_history", alert_notifier.get_recent_urls())
+        socketio.emit("interface_status", get_interface_statuses())
 
     @socketio.on("request_stats")
     def handle_request_stats():
@@ -45,18 +53,38 @@ def init_socketio(app):
     def handle_request_suspicious():
         socketio.emit("suspicious_hosts", alert_notifier.get_suspicious_ips())
 
+    @socketio.on("request_interfaces")
+    def handle_request_interfaces():
+        socketio.emit("interface_status", get_interface_statuses())
+
+    @socketio.on("set_sensitivity")
+    def handle_set_sensitivity(payload):
+        level = (payload or {}).get("level") if isinstance(payload, dict) else payload
+        ok = spike_detector.set_sensitivity(level) if level else False
+        socketio.emit("sensitivity_updated", {
+            "level": spike_detector.get_sensitivity(),
+            "ok": ok,
+        })
+        socketio.emit("statistics_update", get_traffic_stats())
+
 
 def start_statistics_broadcaster(interval_seconds=SOCKET_STATS_INTERVAL):
-    """Periodically broadcast statistics and one-shot bandwidth alerts."""
+    """Periodically broadcast statistics, interface health and bandwidth alerts."""
     prev_high = False
+    prev_idle = False
 
     def broadcaster():
-        nonlocal prev_high
+        nonlocal prev_high, prev_idle
         while True:
             try:
+                # Flush any packets still queued by the sniffer so the live
+                # stream never lags behind the stats tick.
+                _flush_socket_batch()
+
                 stats = get_traffic_stats()
                 socketio.emit("statistics_update", stats)
 
+                # Network-wide bandwidth threshold (one-shot edge trigger).
                 bandwidth = stats.get("bandwidth", {})
                 is_high = bandwidth.get("is_high", False)
                 if is_high and not prev_high:
@@ -68,6 +96,27 @@ def start_statistics_broadcaster(interval_seconds=SOCKET_STATS_INTERVAL):
                         "timestamp": time.strftime("%H:%M:%S", time.localtime()),
                     })
                 prev_high = is_high
+
+                # Inactive-interface warning (req 5): surface a clear message
+                # instead of freezing silently.
+                idle = stats.get("idle_warning", False)
+                iface = stats.get("active_interface", "interface")
+                if idle and not prev_idle:
+                    socketio.emit("interface_warning", {
+                        "interface": iface,
+                        "message": (
+                            f"No traffic detected on {iface}. The interface may be "
+                            "inactive, disconnected, or have no promiscuous capture "
+                            "permission."
+                        ),
+                        "timestamp": time.strftime("%H:%M:%S", time.localtime()),
+                    })
+                elif not idle and prev_idle:
+                    socketio.emit("interface_warning_cleared", {
+                        "interface": iface,
+                        "timestamp": time.strftime("%H:%M:%S", time.localtime()),
+                    })
+                prev_idle = idle
             except Exception as exc:  # pragma: no cover - defensive
                 import logging
                 logging.getLogger(__name__).debug("Broadcaster error: %s", exc)

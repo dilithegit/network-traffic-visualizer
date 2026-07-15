@@ -1,32 +1,33 @@
-// Protocol distribution doughnut chart, built from the statistics payload.
+// Dynamic protocol distribution doughnut chart (req 6). Auto-discovers every
+// observed protocol (TCP, UDP, ICMP, ARP, DNS, HTTPS, TLS, QUIC, SSH, ...)
+// from the backend's `layer_distribution` and retires protocols that have been
+// inactive longer than the configured timeout.
 import { memo } from "react";
 import { Doughnut } from "react-chartjs-2";
 import "../services/chartSetup";
 import { useStats } from "../context/StatsContext";
+import { protocolColor } from "../utils/protocolColors";
 
-const PALETTE = [
-  "#6366f1",
-  "#10b981",
-  "#f59e0b",
-  "#ef4444",
-  "#06b6d4",
-  "#a855f7",
-  "#84cc16",
+const FALLBACK_PALETTE = [
+  "#6366f1", "#10b981", "#f59e0b", "#ef4444", "#06b6d4",
+  "#a855f7", "#84cc16", "#ec4899", "#14b8a6", "#64748b",
 ];
 
 function ProtocolChartBase() {
   const stats = useStats();
-  const distribution = stats?.protocol_distribution || {};
+  // `layer_distribution` is the dynamic, timeout-aware view from the backend.
+  const distribution = stats?.layer_distribution || stats?.protocol_distribution || {};
 
   const labels = Object.keys(distribution);
   const values = Object.values(distribution);
+  const colors = labels.map((name, i) => protocolColor(name) || FALLBACK_PALETTE[i % FALLBACK_PALETTE.length]);
 
   const data = {
     labels,
     datasets: [
       {
         data: values,
-        backgroundColor: PALETTE,
+        backgroundColor: colors,
         borderWidth: 0,
         hoverOffset: 6,
       },
@@ -41,6 +42,11 @@ function ProtocolChartBase() {
       legend: {
         position: "right",
         labels: { color: "#94a3b8", boxWidth: 12, padding: 12 },
+      },
+      tooltip: {
+        callbacks: {
+          label: (ctx) => `${ctx.label}: ${ctx.parsed} pkts`,
+        },
       },
     },
   };

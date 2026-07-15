@@ -35,4 +35,14 @@ export const api = {
   getStats: () => request("/stats"),
 
   getAlerts: () => request("/alerts"),
+
+  getInterfaceStatuses: () => request("/interfaces"),
+
+  getSensitivity: () => request("/sensitivity"),
+
+  setSensitivity: (level) =>
+    request("/sensitivity", {
+      method: "POST",
+      body: JSON.stringify({ level }),
+    }),
 };

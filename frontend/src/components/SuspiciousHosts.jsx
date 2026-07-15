@@ -1,7 +1,6 @@
 // Suspicious hosts panel. Driven by the `suspicious_hosts` array inside the
 // statistics payload; updated every ~2s without per-packet churn.
 import { memo } from "react";
-import { ShieldAlert } from "lucide-react";
 import { useStats } from "../context/StatsContext";
 import Panel from "./Panel";
 

@@ -21,6 +21,39 @@
 ✅ **RESTful API** - Clean API endpoints for frontend consumption  
 ✅ **Performance Optimized** - Rolling buffers, rAF-batched rendering, batch DB writes  
 
+### v3.0.0 Feature Enhancements
+
+The platform was overhauled into a professional-grade monitor. Highlights:
+
+1. **Enhanced URL & Hostname Detection** — full HTTP URL reconstruction
+   (`http://host/path`), TLS SNI + Client Hello analysis, and DNS-correlation
+   hostname caching so encrypted flows still show a destination name
+   (`backend/analysis/hostname_cache.py`, `url_extractor.py`).
+2. **Richer Live URL Feed** — every entry now carries timestamp, source/dest
+   IP, hostname, URL, protocol and destination port.
+3. **Dynamic Spike Detection** — a statistical engine (per-IP packets/sec &
+   bytes/sec baselines, moving average + rolling std-dev, z-score) with
+   Low/Medium/High sensitivity presets; severity scales with deviation.
+4. **Real-Time Network Stats** — current/peak/average bandwidth, packets/sec,
+   bytes/sec, active connections and active devices.
+5. **VMware / Inactive Interface Handling** — robust enumeration with up/down,
+   virtual and loopback classification; a clear warning is shown when a running
+   adapter goes silent instead of freezing.
+6. **Dynamic Protocol Distribution** — auto-discovers any observed protocol
+   (ARP, TCP, UDP, ICMP, DNS, DHCP, TLS, SSH, QUIC, …) with a timeout-based
+   lifecycle so stale protocols retire.
+7. **Advanced Packet Inspection** — Wireshark-style side panel: endpoints, MACs,
+   ports, TTL, TCP flags, DNS/TLS/HTTP detail and a hex + ASCII payload preview.
+8. **Instant Search & Filtering** — syntax filters
+   (`protocol == DNS`, `ip == 192.168.1.10`, `port == 443`, `host contains youtube`)
+   applied client-side without interrupting capture.
+9. **Dashboard Stability & Performance** — `React.memo`/`useMemo`/`useCallback`
+   throughout, packet state isolated from UI state, and Socket.IO batching
+   (`packet_batch`) with rolling buffers.
+10. **Packet Capture Timeline** — horizontal, colour-coded, zoomable timeline
+    with Pause/Resume/Auto-scroll; selecting an event highlights the packet and
+    opens the inspector.
+
 ### Tech Stack
 
 - **Backend:** Python, Flask, Flask-SocketIO, Scapy
@@ -462,7 +495,20 @@ This project is provided as-is for network analysis and monitoring purposes. Ens
 
 ## Version History
 
-### v2.0.0 (Current) - NETSENTRY
+### v3.0.0 (Current) - Professional-Grade Overhaul
+- 🔎 Full HTTP URL reconstruction + TLS SNI/Client Hello analysis
+- 🧠 DNS-correlation hostname cache (encrypted flows show a name, not "HTTPS")
+- 📡 Richer Live URL feed (timestamp, IPs, hostname, URL, protocol, port)
+- 📈 Dynamic statistical spike detection with Low/Medium/High sensitivity
+- ⚡ Real-time bandwidth/pps/bps, active connections & devices
+- 🖥️ VMware / inactive-interface detection with actionable warnings
+- 🔄 Dynamic protocol pie with auto-discovery + timeout-based retirement
+- 🔬 Wireshark-style packet inspector (MAC, TTL, flags, DNS/TLS/HTTP, hex+ASCII)
+- 🔍 Instant syntax search/filter without interrupting capture
+- 🪟 Horizontal packet timeline (colour-coded, zoom, pause, auto-scroll)
+- 🚀 Socket.IO batching + memoized UI for flicker-free high-throughput capture
+
+### v2.0.0 - NETSENTRY
 - 🌐 Dynamic Wireshark-style interface selection (`GET /interfaces`, `POST /capture/start`)
 - 🔍 Modern URL detection: HTTP URL reconstruction + HTTPS SNI (TLS) extraction
 - ⚡ QUIC / UDP-443 capture and detection

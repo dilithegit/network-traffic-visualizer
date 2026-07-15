@@ -1,16 +1,22 @@
-"""Packet capture engine for NETSENTRY.
+"""Packet capture engine for NETSENTRY (req 1-9).
 
-This module owns the live packet buffer and the background capture thread.
-It is responsible for:
+Owns the live packet buffer and the background capture thread. Responsibilities:
 
-* Selecting a network interface (delegated to ``interface_manager``).
-* Parsing raw Scapy packets into a normalized dictionary.
-* Feeding each packet to the URL extractor and spike detector.
-* Emitting ``new_packet`` events through the alert notifier (Socket.IO).
-* Batching packets into the SQLite database for persistence.
+* Select an interface (delegated to ``interface_manager``).
+* Classify raw Scapy packets into a normalized dictionary (``capture.parser``).
+* Enrich each packet with MAC addresses, TTL, TCP flags, a hex/ASCII payload
+  preview, DNS/TLS/HTTP details and a resolved destination hostname (DNS
+  correlation + SNI fallback from ``analysis.url_extractor`` and
+  ``analysis.hostname_cache``).
+* Batch parsed packets and push them to clients as a single ``packet_batch``
+  Socket.IO event (req 9) instead of one emit per packet.
+* Feed URL extraction and the dynamic spike detector.
+* Detect inactive interfaces and expose ``last_packet_time`` so the broadcaster
+  can warn the UI (req 5).
+* Batch packets into SQLite for persistence.
 
-The capture loop is non-blocking: it runs in a daemon thread and reads
-packets with ``store=False`` so Scapy never buffers the whole stream in RAM.
+The capture loop runs in a daemon thread and reads with ``store=False`` so
+Scapy never buffers the whole stream in RAM.
 """
 
 import time
@@ -18,23 +24,27 @@ import threading
 from collections import deque
 from datetime import datetime
 
-from scapy.all import sniff, IP, TCP, UDP, ICMP, Raw, DNS
+from scapy.all import sniff, IP, IPv6, TCP, UDP, ICMP, Raw, DNS
 
 from config import (
     SNIFFER_BUFFER_SIZE,
     SNIFFER_BATCH_SIZE,
+    SOCKET_BATCH_SIZE,
+    SOCKET_BATCH_INTERVAL,
     PACKET_THRESHOLD,
     BANDWIDTH_SPIKE_THRESHOLD_BYTES,
+    PAYLOAD_PREVIEW_BYTES,
 )
 from capture.interface_manager import (
     set_active_interface,
     get_active_interface_name,
 )
-from capture.parser import should_capture_packet
+from capture.parser import classify, should_capture_packet
 from database.db import save_packets_batch
 from alerts.notifier import alert_notifier
 from analysis.url_extractor import url_extractor
 from analysis.spike_detector import spike_detector
+from analysis.hostname_cache import hostname_cache
 
 logger = __import__("logging").getLogger(__name__)
 
@@ -48,6 +58,14 @@ _db_batch = []
 _packet_id = 0
 _id_lock = threading.Lock()
 
+# Socket.IO batching state (req 9): packets are queued and flushed together.
+_socket_batch = []
+_socket_batch_lock = threading.Lock()
+_last_socket_flush = 0.0
+
+# Idle watchdog (req 5): timestamp of the most recent captured packet.
+last_packet_time = 0.0
+
 
 def _next_packet_id():
     """Return a monotonically increasing id used as a stable React key."""
@@ -59,12 +77,17 @@ def _next_packet_id():
 
 def get_active_interface():
     """Return the interface currently selected for capture."""
-    return get_active_interface()
+    return get_active_interface_name()
 
 
 def is_capture_running():
     """Return True while the capture thread is active."""
     return _capture_running
+
+
+def get_last_packet_time():
+    """Epoch seconds of the most recent captured packet (0 if never)."""
+    return last_packet_time
 
 
 def stop_capture():
@@ -75,6 +98,7 @@ def stop_capture():
     if thread and thread.is_alive():
         thread.join(timeout=3)
     _capture_thread = None
+    _flush_socket_batch()
     logger.info("[*] Capture stopped")
     return True
 
@@ -82,23 +106,20 @@ def stop_capture():
 def start_capture(interface=None):
     """Start (or restart) capture on the given interface.
 
-    If ``interface`` is ``None`` the default interface is selected. Any
-    previously running capture is stopped first so switching interfaces never
-    leaves two sniffers competing for the same buffer.
+    Any previously running capture is stopped first so switching interfaces
+    never leaves two sniffers competing for the same buffer.
     """
     global _capture_running, _capture_thread
 
     if interface:
         set_active_interface(interface)
 
-    # Resolve to the real Scapy name; the friendly name is only for display.
     target = get_active_interface_name()
     if not target:
         logger.error("[!] No suitable network interface found")
         _capture_running = False
         return False
 
-    # Restart cleanly: stop any existing loop before spawning a new thread.
     if _capture_running and _capture_thread and _capture_thread.is_alive():
         _capture_running = False
         _capture_thread.join(timeout=3)
@@ -114,7 +135,7 @@ def start_capture(interface=None):
 
 def _capture_loop(interface):
     """Blocking loop that drives Scapy's sniffer until stopped."""
-    global _capture_running
+    global _capture_running, last_packet_time
     try:
         while _capture_running:
             sniff(
@@ -129,163 +150,211 @@ def _capture_loop(interface):
         logger.error("[*] Hint: run with administrator / root privileges")
     finally:
         _capture_running = False
+        _flush_socket_batch()
 
 
 # ---------------------------------------------------------------------------
-# Packet parsing
+# Packet parsing + enrichment
 # ---------------------------------------------------------------------------
 
-_PORT_LABELS = {
-    21: "FTP", 22: "SSH", 25: "SMTP", 53: "DNS", 67: "DHCP", 68: "DHCP",
-    80: "HTTP", 110: "POP3", 123: "NTP", 143: "IMAP", 443: "HTTPS",
-    587: "SMTP", 993: "IMAPS", 995: "POP3S",
-}
+def _payload_preview(packet):
+    """Return (hex_string, ascii_string) for the first bytes of the payload."""
+    if not packet.haslayer(Raw):
+        return "", ""
+    try:
+        raw = bytes(packet[Raw].load)[:PAYLOAD_PREVIEW_BYTES]
+    except Exception:
+        return "", ""
+    hex_lines = []
+    ascii_chars = []
+    for i in range(0, len(raw), 16):
+        chunk = raw[i:i + 16]
+        hex_part = " ".join(f"{b:02x}" for b in chunk)
+        ascii_part = "".join(chr(b) if 32 <= b < 127 else "." for b in chunk)
+        hex_lines.append(hex_part)
+        ascii_chars.append(ascii_part)
+    return "\n".join(hex_lines), "".join(ascii_chars)
 
 
-def _port_label(src_port, dst_port):
-    port = dst_port or src_port
-    return _PORT_LABELS.get(port, "")
-
-
-def _tcp_flags(packet):
-    flags = packet[TCP].flags
-    names = []
-    if flags & 0x02:
-        names.append("SYN")
-    if flags & 0x10:
-        names.append("ACK")
-    if flags & 0x01:
-        names.append("FIN")
-    if flags & 0x04:
-        names.append("RST")
-    if flags & 0x08:
-        names.append("PSH")
-    if flags & 0x20:
-        names.append("URG")
-    return names
+def _dns_info(packet):
+    """Extract a compact DNS summary (query name, response answers)."""
+    if not packet.haslayer(DNS):
+        return None
+    dns = packet[DNS]
+    info = {
+        "type": "response" if getattr(dns, "qr", 0) == 1 else "query",
+        "query": None,
+        "answer_count": getattr(dns, "ancount", 0),
+        "answers": [],
+    }
+    try:
+        qd = getattr(dns, "qd", None)
+        if qd:
+            info["query"] = qd.qname.decode("utf-8", "ignore") if isinstance(qd.qname, bytes) else str(qd.qname)
+    except Exception:
+        pass
+    # Cache the mapping for SNI-less HTTPS correlation (req 1).
+    hostname_cache.learn_from_dns(dns)
+    try:
+        an = getattr(dns, "an", None)
+        if an:
+            records = an if isinstance(an, list) else [an]
+            for rr in records:
+                rdata = getattr(rr, "rdata", None)
+                if isinstance(rdata, str):
+                    info["answers"].append(rdata)
+    except Exception:
+        pass
+    return info
 
 
 def process_packet(packet):
-    """Parse a packet, update shared state and fan out to analysis modules."""
+    """Parse, enrich and fan out a single packet."""
+    global last_packet_time
     if not should_capture_packet(packet):
         return
 
-    ip = packet[IP]
-    src = ip.src
-    dst = ip.dst
-    proto = ip.proto
-    size = len(packet)
+    base = classify(packet)
+    now = time.time()
+    last_packet_time = now
 
-    src_port = dst_port = 0
-    if packet.haslayer(TCP):
-        src_port = packet[TCP].sport
-        dst_port = packet[TCP].dport
-    elif packet.haslayer(UDP):
-        src_port = packet[UDP].sport
-        dst_port = packet[UDP].dport
+    src_ip = base["src_ip"]
+    dst_ip = base["dst_ip"]
+    src_port = base["src_port"]
+    dst_port = base["dst_port"]
 
-    proto_map = {6: "TCP", 17: "UDP", 1: "ICMP"}
-    proto_name = proto_map.get(proto, f"OTHER({proto})")
+    # DNS info (also feeds the hostname cache).
+    dns = _dns_info(packet)
 
-    info = ""
-    layer = proto_name
+    # HTTP / HTTPS / TLS analysis (structured for the inspector).
+    analyzed = url_extractor.analyze(packet) if base["has_ip"] else {}
+    url = analyzed.get("url")
+    hostname = analyzed.get("hostname")
+    tls = analyzed.get("tls")
+    http = analyzed.get("http")
 
-    if packet.haslayer(TCP):
-        flags = _tcp_flags(packet)
-        port_label = _port_label(src_port, dst_port)
-        if flags:
-            info = ", ".join(flags)
-        elif port_label:
-            info = port_label
-        else:
-            info = "TCP"
+    # Destination hostname fallback: SNI -> DNS cache -> IP.
+    if not hostname and dst_ip:
+        hostname = hostname_cache.resolve(dst_ip) or hostname_cache.resolve(src_ip)
 
-        if dst_port in {80, 443} or src_port in {80, 443}:
-            layer = "HTTP" if (dst_port == 80 or src_port == 80) else "HTTPS"
-        elif port_label:
-            layer = port_label
+    # Emit a URL-feed event when we have something meaningful.
+    if url:
+        url_extractor.publish_result(analyzed, src_ip, dst_ip, src_port, dst_port)
 
-        if packet.haslayer(Raw):
-            try:
-                payload = bytes(packet[Raw].load)
-                text = payload.decode("latin-1", errors="ignore")
-                if "HTTP/" in text or text.startswith(
-                    ("GET ", "POST ", "HEAD ", "PUT ", "DELETE ")
-                ):
-                    info = "HTTP " + text.splitlines()[0].strip()
-                elif "CONNECT " in text:
-                    info = "HTTPS CONNECT"
-                elif payload[:3] == b"\x16\x03":
-                    info = "TLS ClientHello"
-            except Exception:
-                pass
+    # HTTP details from raw payload when scapy's http layer was absent.
+    if not http and packet.haslayer(Raw):
+        http = _raw_http_headers(packet)
 
-    elif packet.haslayer(UDP):
-        port_label = _port_label(src_port, dst_port)
-        # QUIC rides on UDP/443 for most modern services.
-        if {src_port, dst_port} & {443}:
-            layer = "QUIC"
-            info = "QUIC"
-        if dst_port == 53 or src_port == 53:
-            layer = "DNS"
-            if packet.haslayer(DNS):
-                dns = packet[DNS]
-                qname = ""
-                if dns.qdcount and dns.qd:
-                    try:
-                        qname = dns.qd.qname.decode("utf-8", errors="ignore")
-                    except Exception:
-                        qname = str(dns.qd.qname)
-                info = f"DNS query: {qname}" if qname else "DNS"
-            else:
-                info = "DNS"
-        elif port_label:
-            info = port_label
-            layer = port_label
-        elif layer != "QUIC":
-            info = "UDP"
-    elif packet.haslayer(ICMP):
-        info = "ICMP"
+    hex_str, ascii_str = _payload_preview(packet)
 
-    current_time = time.time()
     entry = {
         "id": _next_packet_id(),
-        "src_ip": src,
-        "dst_ip": dst,
+        "src_ip": src_ip,
+        "dst_ip": dst_ip,
         "src_port": src_port,
         "dst_port": dst_port,
-        "protocol": proto_name,
-        "size": size,
-        "timestamp": current_time,
+        "protocol": base["protocol"],
+        "layer": base["layer"],
+        "size": base["size"],
+        "timestamp": now,
         "time": datetime.now().strftime("%H:%M:%S"),
-        "is_local": src.startswith(("192.168", "10.", "172.16", "127.")),
-        "info": info,
-        "layer": layer,
+        "is_local": base["is_local"],
+        "info": base["info"],
+        "transport": base["transport"],
+        "ip_version": base["ip_version"],
+        "mac_src": base["mac_src"],
+        "mac_dst": base["mac_dst"],
+        "ttl": base["ttl"],
+        "flags": base["flags"],
+        "hostname": hostname or "",
+        "url": url or "",
+        "dns": dns,
+        "tls": tls,
+        "http": http,
+        "payload_hex": hex_str,
+        "payload_ascii": ascii_str,
     }
 
-    # 1. Update the live buffer that feeds the REST API + Socket.IO clients.
     traffic_data.append(entry)
+    _queue_socket(entry)
 
-    # 2. Emit a lightweight packet event for the live log (capped client-side).
-    alert_notifier.publish_packet(entry)
-
-    # 3. Extract HTTP URLs / HTTPS SNI (emits new_url on a match).
-    try:
-        url_extractor.process_packet(packet)
-    except Exception as exc:  # pragma: no cover - defensive
-        logger.debug("URL extraction failed: %s", exc)
-
-    # 4. Run per-IP spike detection (emits spike_detected / new_alert).
     try:
         spike_detector.process_packet(entry)
     except Exception as exc:  # pragma: no cover - defensive
         logger.debug("Spike detection failed: %s", exc)
 
-    # 5. Batch packets into SQLite for historical persistence.
     _db_batch.append(entry)
     if len(_db_batch) >= SNIFFER_BATCH_SIZE:
         _flush_db_batch()
 
+
+def _raw_http_headers(packet):
+    """Best-effort HTTP header extraction from a raw TCP payload."""
+    try:
+        raw = bytes(packet[Raw].load)
+        text = raw.decode("latin-1", "ignore")
+        if not ("HTTP/" in text or text.startswith(("GET ", "POST ", "HEAD ", "PUT "))):
+            return None
+        lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+        host = None
+        path = "/"
+        method = "GET"
+        headers = []
+        seen = False
+        for ln in lines:
+            if ln.lower().startswith("host:"):
+                host = ln.split(":", 1)[1].strip()
+            elif ln.startswith(("GET ", "POST ", "HEAD ", "PUT ", "OPTIONS ")):
+                parts = ln.split(" ")
+                method = parts[0]
+                if len(parts) >= 2:
+                    path = parts[1]
+                seen = True
+            elif seen and ":" in ln:
+                headers.append(ln)
+        if not host:
+            return None
+        return {"method": method, "host": host, "path": path, "headers": headers}
+    except Exception:
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Socket.IO batching (req 9)
+# ---------------------------------------------------------------------------
+
+def _queue_socket(entry):
+    """Append an entry to the Socket.IO batch and flush when due."""
+    global _last_socket_flush
+    with _socket_batch_lock:
+        _socket_batch.append(entry)
+        due = (
+            len(_socket_batch) >= SOCKET_BATCH_SIZE
+            or (time.time() - _last_socket_flush) >= SOCKET_BATCH_INTERVAL
+        )
+        if due:
+            _flush_socket_batch_locked()
+
+
+def _flush_socket_batch():
+    with _socket_batch_lock:
+        _flush_socket_batch_locked()
+
+
+def _flush_socket_batch_locked():
+    """Emit queued packets as a single ``packet_batch`` event."""
+    global _socket_batch, _last_socket_flush
+    if not _socket_batch:
+        return
+    batch = _socket_batch
+    _socket_batch = []
+    _last_socket_flush = time.time()
+    alert_notifier.publish_packet_batch(batch)
+
+
+# ---------------------------------------------------------------------------
+# Database batching
+# ---------------------------------------------------------------------------
 
 def _flush_db_batch():
     global _db_batch
@@ -319,3 +388,4 @@ def get_packet_count():
 def flush():
     """Flush any pending database batch (call on shutdown)."""
     _flush_db_batch()
+    _flush_socket_batch()

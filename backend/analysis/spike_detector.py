@@ -1,47 +1,85 @@
-"""Per-IP traffic spike detector and suspicious-host registry.
+"""Dynamic, statistical traffic-spike detector (req 3).
 
-For every source IP we keep a rolling 1-second window of packets and bytes.
-When the packets/sec or bytes/sec cross configurable thresholds the host is
-marked WARNING or CRITICAL. Each host accumulates a profile (spike count,
-peak bandwidth, last activity, current status) that powers the Suspicious
-Hosts panel.
+Replaces the previous fixed-threshold detector. For every source IP we bucket
+packets into one-second intervals and keep a rolling baseline of
+(packets/sec, bytes/sec) samples. An observation is flagged when it deviates
+from the learned baseline by more than a configurable number of standard
+deviations (z-score). Severity scales automatically with the magnitude of the
+deviation, and three sensitivity presets (low / medium / high) tune how
+aggressively we alert.
 """
 
 import time
+import threading
 from collections import defaultdict, deque
 
 from config import (
     PACKET_THRESHOLD,
     BANDWIDTH_SPIKE_THRESHOLD_BYTES,
     SPIKE_ALERT_COOLDOWN,
+    SPIKE_SENSITIVITY,
+    SPIKE_SENSITIVITY_PRESETS,
+    SPIKE_SEVERITY_CRITICAL_Z,
+    SPIKE_SEVERITY_WARNING_Z,
 )
 
 logger = __import__("logging").getLogger(__name__)
 
 
 class SpikeDetector:
-    """Detect suspicious traffic spikes and maintain a suspicious hosts registry."""
+    """Detect anomalous traffic spikes using a per-IP statistical baseline."""
 
     def __init__(
         self,
+        notifier=None,
+        sensitivity=SPIKE_SENSITIVITY,
         packet_threshold=PACKET_THRESHOLD,
         bandwidth_threshold_bytes_per_second=BANDWIDTH_SPIKE_THRESHOLD_BYTES,
-        notifier=None,
-        window_seconds=1.0,
         cooldown=SPIKE_ALERT_COOLDOWN,
     ):
+        self.notifier = notifier
         self.packet_threshold = packet_threshold
         self.bandwidth_threshold_bytes_per_second = bandwidth_threshold_bytes_per_second
-        self.notifier = notifier
-        self.window_seconds = window_seconds
         self.cooldown = cooldown
 
-        self.recent_alerts = deque(maxlen=100)
-        self.packet_history = defaultdict(deque)  # ip -> deque[(ts, size)]
-        self._prev_status = {}                     # ip -> last emitted status
-        self._last_alert_ts = {}                   # ip -> last emit timestamp
-        self.host_profiles = {}                    # ip -> profile dict
+        self.sensitivity = sensitivity
+        self._preset = SPIKE_SENSITIVITY_PRESETS.get(sensitivity, SPIKE_SENSITIVITY_PRESETS["medium"])
+        self.warning_z = self._preset["zscore"]
+        # Critical escalation scales with the chosen sensitivity preset.
+        self.critical_z = max(self.warning_z * 1.6, SPIKE_SEVERITY_CRITICAL_Z)
+        self.min_samples = self._preset["min_samples"]
+        self.window = self._preset["window"]
 
+        self.recent_alerts = deque(maxlen=100)
+        self.accumulators = {}               # ip -> {second, count, bytes}
+        self.baselines = defaultdict(deque)  # ip -> deque[(pps, bps)]
+        self._prev_status = {}               # ip -> last emitted status
+        self._last_alert_ts = {}             # ip -> last emit timestamp
+        self.host_profiles = {}              # ip -> profile dict
+        self._lock = threading.Lock()
+
+    # -- Configuration ----------------------------------------------------
+    def set_sensitivity(self, level):
+        """Switch the sensitivity preset (low | medium | high)."""
+        preset = SPIKE_SENSITIVITY_PRESETS.get(level)
+        if not preset:
+            return False
+        with self._lock:
+            self.sensitivity = level
+            self._preset = preset
+            self.warning_z = preset["zscore"]
+            self.critical_z = max(preset["zscore"] * 1.6, SPIKE_SEVERITY_CRITICAL_Z)
+            self.min_samples = preset["min_samples"]
+            self.window = preset["window"]
+            # Reset baselines so the new preset learns fresh.
+            self.baselines.clear()
+            self.accumulators.clear()
+        return True
+
+    def get_sensitivity(self):
+        return self.sensitivity
+
+    # -- Ingestion --------------------------------------------------------
     def process_packet(self, packet):
         src_ip = packet.get("src_ip")
         size = packet.get("size", 0)
@@ -49,69 +87,141 @@ class SpikeDetector:
             return None
 
         now = time.time()
-        history = self.packet_history[src_ip]
-        history.append((now, size))
-        self._prune(history, now)
+        sec = int(now)
 
-        packets_per_second = len(history)
-        bytes_per_second = sum(sz for _, sz in history)
-        mbps = round((bytes_per_second * 8) / (1024 * 1024), 2)
+        acc = self.accumulators.get(src_ip)
+        if acc is None:
+            acc = self.accumulators[src_ip] = {"second": sec, "count": 0, "bytes": 0}
 
-        profile = self.host_profiles.setdefault(src_ip, {
-            "ip": src_ip,
-            "spike_count": 0,
-            "highest_bandwidth_mbps": 0,
-            "last_activity": None,
-            "current_status": "NORMAL",
-        })
+        # Bucket boundary crossed: finalize the previous second. The current
+        # packet starts the new bucket. This yields one evaluation per IP/sec.
+        if sec != acc["second"]:
+            alert = self._finalize(src_ip, acc, sec)
+            acc["second"] = sec
+            acc["count"] = 0
+            acc["bytes"] = 0
+        else:
+            alert = None
 
-        profile["highest_bandwidth_mbps"] = max(profile["highest_bandwidth_mbps"], mbps)
-        profile["last_activity"] = time.strftime("%H:%M:%S", time.localtime(now))
+        acc["count"] += 1
+        acc["bytes"] += size
 
-        status = self._determine_status(packets_per_second, bytes_per_second)
-        profile["current_status"] = status
+        # Update lightweight profile counters (no baseline required).
+        self._touch_profile(src_ip, size, now)
+        return alert
 
-        # Only emit when the status changes or after a cooldown, so a host that
-        # stays hot does not flood the alert feed every single packet.
-        prev = self._prev_status.get(src_ip, "NORMAL")
-        last_ts = self._last_alert_ts.get(src_ip, 0)
+    # -- Evaluation -------------------------------------------------------
+    def _finalize(self, ip, acc, sec):
+        pps = acc["count"]
+        bps = acc["bytes"]
+        mbps = round((bps * 8) / (1024 * 1024), 2)
+
+        with self._lock:
+            samples = self.baselines[ip]
+            # Evaluate against the *existing* baseline (current excluded).
+            if len(samples) >= self.min_samples:
+                mean_pps, std_pps, mean_bps, std_bps = self._stats(samples)
+                z_pps = self._zscore(pps, mean_pps, std_pps)
+                z_bps = self._zscore(mbps, mean_bps, std_bps)
+                # A zero-variance baseline with a sudden jump is, by
+                # definition, anomalous: force a high z-score so it triggers.
+                if std_pps == 0 and pps > mean_pps:
+                    z_pps = max(z_pps, self.critical_z + 1)
+                if std_bps == 0 and mbps > mean_bps:
+                    z_bps = max(z_bps, self.critical_z + 1)
+                z = max(z_pps, z_bps)
+                status = self._severity(z)
+            else:
+                # Warm-up: fall back to the legacy fixed thresholds.
+                status = self._fixed_status(pps, bps)
+
+            # Append the finalized sample *after* evaluation.
+            samples.append((pps, mbps))
+            while len(samples) > self.window:
+                samples.popleft()
+
+        profile = self.host_profiles.get(ip)
+        if profile:
+            profile["current_status"] = status
+
+        return self._maybe_alert(ip, status, pps, mbps, sec)
+
+    def _stats(self, samples):
+        n = len(samples)
+        mean_pps = sum(s[0] for s in samples) / n
+        mean_bps = sum(s[1] for s in samples) / n
+        var_pps = sum((s[0] - mean_pps) ** 2 for s in samples) / n
+        var_bps = sum((s[1] - mean_bps) ** 2 for s in samples) / n
+        return mean_pps, var_pps ** 0.5, mean_bps, var_bps ** 0.5
+
+    @staticmethod
+    def _zscore(value, mean, std):
+        if std <= 0:
+            return 0.0
+        return (value - mean) / std
+
+    def _severity(self, z):
+        if z >= self.critical_z:
+            return "CRITICAL"
+        if z >= self.warning_z:
+            return "WARNING"
+        return "NORMAL"
+
+    def _fixed_status(self, pps, bps):
+        if pps >= self.packet_threshold and bps >= self.bandwidth_threshold_bytes_per_second:
+            return "CRITICAL"
+        if pps >= self.packet_threshold or bps >= self.bandwidth_threshold_bytes_per_second:
+            return "WARNING"
+        return "NORMAL"
+
+    def _maybe_alert(self, ip, status, pps, mbps, sec):
+        prev = self._prev_status.get(ip, "NORMAL")
+        last_ts = self._last_alert_ts.get(ip, 0)
+        now = time.time()
         should_alert = status != "NORMAL" and (
             status != prev or (now - last_ts) >= self.cooldown
         )
-
         alert = None
         if should_alert:
+            profile = self.host_profiles.setdefault(ip, self._new_profile(ip))
             profile["spike_count"] += 1
+            profile["current_status"] = status
             alert = {
                 "alert": "Traffic Spike Detected",
-                "src_ip": src_ip,
-                "packets_per_second": packets_per_second,
+                "src_ip": ip,
+                "packets_per_second": pps,
                 "bandwidth_mbps": mbps,
                 "severity": status,
                 "timestamp": time.strftime("%H:%M:%S", time.localtime(now)),
             }
-            self._prev_status[src_ip] = status
-            self._last_alert_ts[src_ip] = now
+            self._prev_status[ip] = status
+            self._last_alert_ts[ip] = now
             self.recent_alerts.appendleft(alert)
             if self.notifier:
                 self.notifier.publish_spike(alert)
         elif status == "NORMAL":
-            self._prev_status[src_ip] = "NORMAL"
-
+            self._prev_status[ip] = "NORMAL"
         return alert
 
-    def _determine_status(self, pps, bps):
-        if pps >= self.packet_threshold and bps >= self.bandwidth_threshold_bytes_per_second:
-            return "CRITICAL"
-        if bps >= self.bandwidth_threshold_bytes_per_second or pps >= self.packet_threshold:
-            return "WARNING"
-        return "NORMAL"
+    def _touch_profile(self, ip, size, now):
+        profile = self.host_profiles.get(ip)
+        if not profile:
+            profile = self.host_profiles[ip] = self._new_profile(ip)
+        mbps = round((size * 8) / (1024 * 1024), 4)
+        profile["highest_bandwidth_mbps"] = max(profile["highest_bandwidth_mbps"], mbps)
+        profile["last_activity"] = time.strftime("%H:%M:%S", time.localtime(now))
 
-    def _prune(self, history, now):
-        cutoff = now - self.window_seconds
-        while history and history[0][0] < cutoff:
-            history.popleft()
+    @staticmethod
+    def _new_profile(ip):
+        return {
+            "ip": ip,
+            "spike_count": 0,
+            "highest_bandwidth_mbps": 0,
+            "last_activity": None,
+            "current_status": "NORMAL",
+        }
 
+    # -- Accessors --------------------------------------------------------
     def get_recent_alerts(self):
         return list(self.recent_alerts)
 

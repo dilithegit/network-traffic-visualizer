@@ -25,11 +25,13 @@ export function useSocketEvent(eventName, maxLen = 100) {
 }
 
 /**
- * High-frequency packet stream. Incoming packets are buffered and flushed to
- * React state once per animation frame, which keeps the live table smooth
- * even under heavy capture rates and avoids re-render storms.
+ * High-frequency packet stream. The backend pushes packets as a single
+ * `packet_batch` array (req 9) which we buffer and flush to React state once
+ * per animation frame. This keeps the live table smooth under heavy capture
+ * rates and avoids re-render storms. A legacy single `new_packet` payload is
+ * also accepted so the hook keeps working against older backends.
  */
-export function usePacketStream(eventName = "new_packet", maxLen = 200, seed = []) {
+export function usePacketStream(eventName = "packet_batch", maxLen = 300, seed = []) {
   const [packets, setPackets] = useState(seed || []);
   const bufferRef = useRef([]);
   const frameRef = useRef(null);
@@ -47,8 +49,12 @@ export function usePacketStream(eventName = "new_packet", maxLen = 200, seed = [
       });
     };
 
-    const handler = (pkt) => {
-      bufferRef.current.push(pkt);
+    const handler = (payload) => {
+      if (Array.isArray(payload)) {
+        for (let i = 0; i < payload.length; i++) bufferRef.current.push(payload[i]);
+      } else {
+        bufferRef.current.push(payload);
+      }
       if (frameRef.current == null) {
         frameRef.current = requestAnimationFrame(flush);
       }
@@ -72,6 +78,44 @@ export function usePacketStream(eventName = "new_packet", maxLen = 200, seed = [
   }, [eventName, maxLen, seed]);
 
   return packets;
+}
+
+/** Live interface statuses (req 5): up/down, virtual, loopback flags. */
+export function useInterfaceStatus() {
+  const [statuses, setStatuses] = useState([]);
+  useEffect(() => {
+    const handler = (payload) => setStatuses(Array.isArray(payload) ? payload : []);
+    socket.on("interface_status", handler);
+    return () => socket.off("interface_status", handler);
+  }, []);
+  return statuses;
+}
+
+/** Inactive-interface warning banner state (req 5). */
+export function useInterfaceWarning() {
+  const [warning, setWarning] = useState(null);
+  useEffect(() => {
+    const onWarn = (payload) => setWarning(payload);
+    const onClear = () => setWarning(null);
+    socket.on("interface_warning", onWarn);
+    socket.on("interface_warning_cleared", onClear);
+    return () => {
+      socket.off("interface_warning", onWarn);
+      socket.off("interface_warning_cleared", onClear);
+    };
+  }, []);
+  return warning;
+}
+
+/** Spike-detection sensitivity level (req 3). */
+export function useSensitivity() {
+  const [level, setLevel] = useState(null);
+  useEffect(() => {
+    const onUpdate = (payload) => setLevel(payload?.level ?? level);
+    socket.on("sensitivity_updated", onUpdate);
+    return () => socket.off("sensitivity_updated", onUpdate);
+  }, [level]);
+  return level;
 }
 
 /** Connection status indicator for the navbar. */

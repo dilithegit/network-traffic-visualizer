@@ -1,11 +1,13 @@
 from flask import Blueprint, jsonify, request
 from capture.interface_manager import (
     get_interface_list,
+    get_interface_statuses,
     set_active_interface,
     get_active_interface_display,
 )
 from capture.sniffer import start_capture, stop_capture, is_capture_running, traffic_data
 from analysis.stats import get_traffic_stats
+from analysis.spike_detector import spike_detector
 from alerts.notifier import alert_notifier
 
 api = Blueprint('api', __name__)
@@ -13,11 +15,27 @@ api = Blueprint('api', __name__)
 
 @api.route('/interfaces', methods=['GET'])
 def interfaces():
-    """Return the list of available capture interfaces."""
+    """Return available capture interfaces plus their health status (req 5)."""
     return jsonify({
         'interfaces': get_interface_list(),
+        'statuses': get_interface_statuses(),
         'active_interface': get_active_interface_display(),
     }), 200
+
+
+@api.route('/sensitivity', methods=['GET'])
+def get_sensitivity_route():
+    """Return the current spike-detection sensitivity level."""
+    return jsonify({'sensitivity': spike_detector.get_sensitivity()}), 200
+
+
+@api.route('/sensitivity', methods=['POST'])
+def set_sensitivity_route():
+    """Change the spike-detection sensitivity (low | medium | high)."""
+    data = request.get_json(force=True, silent=True) or {}
+    level = data.get('level')
+    ok = spike_detector.set_sensitivity(level) if level else False
+    return jsonify({'ok': ok, 'sensitivity': spike_detector.get_sensitivity()}), 200 if ok else 400
 
 
 @api.route('/capture/start', methods=['POST'])
